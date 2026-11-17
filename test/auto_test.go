@@ -1,33 +1,24 @@
 package test
 
 import (
-	"io/ioutil"
-	"log"
 	"os"
-	"path"
+	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/coredns/coredns/middleware/proxy"
-	"github.com/coredns/coredns/middleware/test"
-	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
 )
 
 func TestAuto(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {
-			directory ` + tmpdir + ` db\.(.*) {1} 1
+			directory ` + tmpdir + ` db\.(.*) {1}
+			reload 0.01s
 		}
-	}
-`
+	}`
 
 	i, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
@@ -35,62 +26,64 @@ func TestAuto(t *testing.T) {
 	}
 	defer i.Stop()
 
-	log.SetOutput(ioutil.Discard)
-
-	p := proxy.NewLookup([]string{udp})
-	state := request.Request{W: &test.ResponseWriter{}, Req: new(dns.Msg)}
-
-	resp, err := p.Lookup(state, "www.example.org.", dns.TypeA)
+	m := new(dns.Msg)
+	m.SetQuestion("www.example.org.", dns.TypeA)
+	resp, err := dns.Exchange(m, udp)
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(path.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(1500 * time.Millisecond) // wait for it to be picked up
-
-	resp, err = p.Lookup(state, "www.example.org.", dns.TypeA)
-	if err != nil {
-		t.Fatal("Expected to receive reply, but didn't")
+	for start := time.Now(); time.Since(start) < 5*time.Second; {
+		resp, err = dns.Exchange(m, udp)
+		if err != nil {
+			t.Fatal("Expected to receive reply, but didn't")
+		}
+		if len(resp.Answer) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(resp.Answer) != 1 {
 		t.Fatalf("Expected 1 RR in the answer section, got %d", len(resp.Answer))
 	}
 
 	// Remove db.example.org again.
-	os.Remove(path.Join(tmpdir, "db.example.org"))
+	os.Remove(filepath.Join(tmpdir, "db.example.org"))
 
-	time.Sleep(1100 * time.Millisecond) // wait for it to be picked up
-	resp, err = p.Lookup(state, "www.example.org.", dns.TypeA)
-	if err != nil {
-		t.Fatal("Expected to receive reply, but didn't")
+	for start := time.Now(); time.Since(start) < 5*time.Second; {
+		resp, err = dns.Exchange(m, udp)
+		if err != nil {
+			t.Fatal("Expected to receive reply, but didn't")
+		}
+		if resp.Rcode == dns.RcodeRefused {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoNonExistentZone(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	log.SetOutput(ioutil.Discard)
+	tmpdir := t.TempDir()
 
 	corefile := `.:0 {
 		auto {
-			directory ` + tmpdir + ` (.*) {1} 1
+			directory ` + tmpdir + ` (.*) {1}
+			reload 0.01s
 		}
 		errors stdout
-	}
-`
+	}`
 
 	i, err := CoreDNSServer(corefile)
 	if err != nil {
@@ -103,71 +96,71 @@ func TestAutoNonExistentZone(t *testing.T) {
 	}
 	defer i.Stop()
 
-	p := proxy.NewLookup([]string{udp})
-	state := request.Request{W: &test.ResponseWriter{}, Req: new(dns.Msg)}
-
-	resp, err := p.Lookup(state, "example.org.", dns.TypeA)
+	m := new(dns.Msg)
+	m.SetQuestion("example.org.", dns.TypeA)
+	resp, err := dns.Exchange(m, udp)
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoAXFR(t *testing.T) {
 	t.Parallel()
-	log.SetOutput(ioutil.Discard)
 
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {
-			directory ` + tmpdir + ` db\.(.*) {1} 1
-			transfer to *
+			directory ` + tmpdir + ` db\.(.*) {1}
+			reload 0.01s
 		}
-	}
-`
+		transfer {
+			to *
+		}
+	}`
 
 	i, err := CoreDNSServer(corefile)
 	if err != nil {
 		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
 	}
 
-	udp, _ := CoreDNSServerPorts(i, 0)
-	if udp == "" {
-		t.Fatal("Could not get UDP listening port")
+	_, tcp := CoreDNSServerPorts(i, 0)
+	if tcp == "" {
+		t.Fatal("Could not get TCP listening port")
 	}
 	defer i.Stop()
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(path.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(1100 * time.Millisecond) // wait for it to be picked up
+	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
 
-	p := proxy.NewLookup([]string{udp})
+	tr := new(dns.Transfer)
 	m := new(dns.Msg)
 	m.SetAxfr("example.org.")
-	state := request.Request{W: &test.ResponseWriter{}, Req: m}
-
-	resp, err := p.Lookup(state, "example.org.", dns.TypeAXFR)
+	c, err := tr.In(m, tcp)
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if len(resp.Answer) != 5 {
-		t.Fatalf("Expected response with %d RRs, got %d", 5, len(resp.Answer))
+	l := 0
+	for e := range c {
+		l += len(e.RR)
+	}
+
+	if l != 5 {
+		t.Fatalf("Expected response with %d RRs, got %d", 5, l)
 	}
 }
 
 const zoneContent = `; testzone
-@	IN	SOA	sns.dns.icann.org. noc.dns.icann.org. 2016082534 7200 3600 1209600 3600
-		NS	a.iana-servers.net.
-		NS	b.iana-servers.net.
+@   IN SOA sns.dns.icann.org. noc.dns.icann.org. 2016082534 7200 3600 1209600 3600
+    IN NS  a.iana-servers.net.
+    IN NS  b.iana-servers.net.
 
-www IN A 127.0.0.1
+www IN A   127.0.0.1
 `

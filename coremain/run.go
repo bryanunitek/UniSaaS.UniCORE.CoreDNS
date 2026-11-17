@@ -2,73 +2,64 @@
 package coremain
 
 import (
-	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
-	"github.com/mholt/caddy"
-
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
+	clog "github.com/coredns/coredns/plugin/pkg/log"
 
-	// Plug in CoreDNS
-	_ "github.com/coredns/coredns/core"
+	"go.uber.org/automaxprocs/maxprocs"
 )
 
 func init() {
-	// Reset flag.CommandLine to get rid of unwanted flags for instance from glog (used in kubernetes).
-	// And readd the once we want to keep.
-	flag.VisitAll(func(f *flag.Flag) {
-		if _, ok := flagsBlacklist[f.Name]; ok {
-			return
-		}
-		flagsToKeep = append(flagsToKeep, f)
-	})
-
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	for _, f := range flagsToKeep {
-		flag.Var(f.Value, f.Name, f.Usage)
+	if err := dnsserver.Register(); err != nil {
+		panic(err)
 	}
-
-	caddy.TrapSignals()
 	caddy.DefaultConfigFile = "Corefile"
 	caddy.Quiet = true // don't show init stuff from caddy
 	setVersion()
 
 	flag.StringVar(&conf, "conf", "", "Corefile to load (default \""+caddy.DefaultConfigFile+"\")")
-	flag.StringVar(&cpu, "cpu", "100%", "CPU cap")
 	flag.BoolVar(&plugins, "plugins", false, "List installed plugins")
 	flag.StringVar(&caddy.PidFile, "pidfile", "", "Path to write pid file")
 	flag.BoolVar(&version, "version", false, "Show version")
 	flag.BoolVar(&dnsserver.Quiet, "quiet", false, "Quiet mode (no initialization output)")
-	flag.BoolVar(&logfile, "log", false, "Log to standard output")
+	flag.StringVar(&logFormat, "log-format", "text", "Log format (text or json)")
 
 	caddy.RegisterCaddyfileLoader("flag", caddy.LoaderFunc(confLoader))
 	caddy.SetDefaultCaddyfileLoader("default", caddy.LoaderFunc(defaultLoader))
 
-	caddy.AppName = coreName
-	caddy.AppVersion = coreVersion
+	flag.StringVar(&dnsserver.Port, serverType+".port", dnsserver.DefaultPort, "Default port")
+	flag.StringVar(&dnsserver.Port, "p", dnsserver.DefaultPort, "Default port")
+
+	caddy.AppName = CoreName
+	caddy.AppVersion = CoreVersion
 }
 
 // Run is CoreDNS's main() function.
 func Run() {
-
+	caddy.TrapSignals()
 	flag.Parse()
+	if logFormat != "text" {
+		if err := clog.Configure(logFormat, os.Stdout); err != nil {
+			mustLogFatal(err)
+		}
+	}
 
 	if len(flag.Args()) > 0 {
 		mustLogFatal(fmt.Errorf("extra command line arguments: %s", flag.Args()))
 	}
 
-	// Set up process log before anything bad happens
-	if logfile {
-		log.SetOutput(os.Stdout)
+	clog.SetOutput(os.Stdout)
+	if !clog.IsJSON() {
+		log.SetFlags(LogFlags)
 	}
-	log.SetFlags(log.LstdFlags)
 
 	if version {
 		showVersion()
@@ -79,9 +70,9 @@ func Run() {
 		os.Exit(0)
 	}
 
-	// Set CPU cap
-	if err := setCPU(cpu); err != nil {
-		mustLogFatal(err)
+	_, err := maxprocs.Set(maxprocs.Logger(log.Printf))
+	if err != nil {
+		clog.Warningf("Failed to set GOMAXPROCS: %v", err)
 	}
 
 	// Get Corefile input
@@ -96,13 +87,19 @@ func Run() {
 		mustLogFatal(err)
 	}
 
-	logVersion()
 	if !dnsserver.Quiet {
-		showVersion()
+		if clog.IsJSON() {
+			clog.Info(strings.TrimSuffix(versionString()+releaseString(), "\n"))
+			if devBuild && gitShortStat != "" {
+				clog.Infof("%s\n%s", gitShortStat, gitFilesModified)
+			}
+		} else {
+			showVersion()
+		}
 	}
 
 	// Twiddle your thumbs
-	instance.Wait()
+	runService(instance)
 }
 
 // mustLogFatal wraps log.Fatal() in a way that ensures the
@@ -111,9 +108,12 @@ func Run() {
 // enabled. If this process is an upgrade, however, and the user
 // might not be there anymore, this just logs to the process
 // log and exits.
-func mustLogFatal(args ...interface{}) {
+func mustLogFatal(args ...any) {
 	if !caddy.IsUpgrade() {
-		log.SetOutput(os.Stderr)
+		clog.SetOutput(os.Stderr)
+	}
+	if clog.IsJSON() {
+		clog.Fatal(args...)
 	}
 	log.Fatal(args...)
 }
@@ -128,7 +128,7 @@ func confLoader(serverType string) (caddy.Input, error) {
 		return caddy.CaddyfileFromPipe(os.Stdin, serverType)
 	}
 
-	contents, err := ioutil.ReadFile(conf)
+	contents, err := os.ReadFile(filepath.Clean(conf))
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func confLoader(serverType string) (caddy.Input, error) {
 
 // defaultLoader loads the Corefile from the current working directory.
 func defaultLoader(serverType string) (caddy.Input, error) {
-	contents, err := ioutil.ReadFile(caddy.DefaultConfigFile)
+	contents, err := os.ReadFile(caddy.DefaultConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -153,12 +153,6 @@ func defaultLoader(serverType string) (caddy.Input, error) {
 		Filepath:       caddy.DefaultConfigFile,
 		ServerTypeName: serverType,
 	}, nil
-}
-
-// logVersion logs the version that is starting.
-func logVersion() {
-	log.Print("[INFO] " + versionString())
-	log.Print("[INFO] " + releaseString())
 }
 
 // showVersion prints the version that is starting.
@@ -180,7 +174,7 @@ func versionString() string {
 // e.g.,
 // linux/amd64, go1.8.3, a6d2d7b5
 func releaseString() string {
-	return fmt.Sprintf("%s/%s, %s, %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), gitCommit)
+	return fmt.Sprintf("%s/%s, %s, %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), GitCommit)
 }
 
 // setVersion figures out the version information
@@ -192,56 +186,22 @@ func setVersion() {
 	// Only set the appVersion if -ldflags was used
 	if gitNearestTag != "" || gitTag != "" {
 		if devBuild && gitNearestTag != "" {
-			appVersion = fmt.Sprintf("%s (+%s %s)",
-				strings.TrimPrefix(gitNearestTag, "v"), gitCommit, buildDate)
+			appVersion = fmt.Sprintf("%s (+%s %s)", strings.TrimPrefix(gitNearestTag, "v"), GitCommit, buildDate)
 		} else if gitTag != "" {
 			appVersion = strings.TrimPrefix(gitTag, "v")
 		}
 	}
 }
 
-// setCPU parses string cpu and sets GOMAXPROCS
-// according to its value. It accepts either
-// a number (e.g. 3) or a percent (e.g. 50%).
-func setCPU(cpu string) error {
-	var numCPU int
-
-	availCPU := runtime.NumCPU()
-
-	if strings.HasSuffix(cpu, "%") {
-		// Percent
-		var percent float32
-		pctStr := cpu[:len(cpu)-1]
-		pctInt, err := strconv.Atoi(pctStr)
-		if err != nil || pctInt < 1 || pctInt > 100 {
-			return errors.New("invalid CPU value: percentage must be between 1-100")
-		}
-		percent = float32(pctInt) / 100
-		numCPU = int(float32(availCPU) * percent)
-	} else {
-		// Number
-		num, err := strconv.Atoi(cpu)
-		if err != nil || num < 1 {
-			return errors.New("invalid CPU value: provide a number or percent greater than 0")
-		}
-		numCPU = num
-	}
-
-	if numCPU > availCPU {
-		numCPU = availCPU
-	}
-
-	runtime.GOMAXPROCS(numCPU)
-	return nil
-}
-
 // Flags that control program flow or startup
 var (
-	conf    string
-	cpu     string
-	logfile bool
-	version bool
-	plugins bool
+	conf      string
+	version   bool
+	plugins   bool
+	logFormat string
+
+	// LogFlags are initially set to 0 for no extra output
+	LogFlags int
 )
 
 // Build information obtained with the help of -ldflags
@@ -252,20 +212,9 @@ var (
 	buildDate        string // date -u
 	gitTag           string // git describe --exact-match HEAD 2> /dev/null
 	gitNearestTag    string // git describe --abbrev=0 --tags HEAD
-	gitCommit        string // git rev-parse HEAD
 	gitShortStat     string // git diff-index --shortstat
 	gitFilesModified string // git diff-index --name-only HEAD
+
+	// GitCommit contains the commit where we built CoreDNS from.
+	GitCommit string
 )
-
-// flagsBlacklist removes flags with these names from our flagset.
-var flagsBlacklist = map[string]bool{
-	"logtostderr":      true,
-	"alsologtostderr":  true,
-	"v":                true,
-	"stderrthreshold":  true,
-	"vmodule":          true,
-	"log_backtrace_at": true,
-	"log_dir":          true,
-}
-
-var flagsToKeep []*flag.Flag

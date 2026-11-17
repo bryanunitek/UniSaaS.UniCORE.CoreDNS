@@ -2,63 +2,32 @@ package dnsserver
 
 import (
 	"fmt"
-	"os"
-	"strings"
+	"slices"
 )
 
-// RegisterDevDirective splices name into the list of directives
-// immediately before another directive. This function is ONLY
-// for plugin development purposes! NEVER use it for a plugin
-// that you are not currently building. If before is empty,
-// the directive will be appended to the end of the list.
+// SetDirectives replaces [Directives] with a copy of directives, in execution
+// order. Names must be nonempty and unique. On error, Directives is unchanged.
+// An empty or nil list disables all directives.
 //
-// It is imperative that directives execute in the proper
-// order, and hard-coding the list of directives guarantees
-// a correct, absolute order every time. This function is
-// convenient when developing a plugin, but it does not
-// guarantee absolute ordering. Multiple plugins registering
-// directives with this function will lead to non-
-// deterministic builds and buggy software.
+// This selects directives but does not import or register plugins. A host may
+// register its plugins after this call, before starting Caddy. Unregistered
+// directives used in a Corefile are rejected by Caddy during startup.
 //
-// Directive names must be lower-cased and unique. Any errors
-// here are fatal, and even successful calls print a message
-// to stdout as a reminder to use it only in development.
-func RegisterDevDirective(name, before string) {
-	if name == "" {
-		fmt.Println("[FATAL] Cannot register empty directive name")
-		os.Exit(1)
-	}
-	if strings.ToLower(name) != name {
-		fmt.Printf("[FATAL] %s: directive name must be lowercase\n", name)
-		os.Exit(1)
-	}
-	for _, dir := range directives {
-		if dir == name {
-			fmt.Printf("[FATAL] %s: directive name already exists\n", name)
-			os.Exit(1)
+// The list is process-wide, not per instance. Call SetDirectives before starting
+// any servers, not while servers are running. The caller must serialize it with
+// all other access to Directives, including startup and reload. It is not a
+// runtime reconfiguration API.
+func SetDirectives(directives []string) error {
+	seen := make(map[string]struct{}, len(directives))
+	for i, name := range directives {
+		if name == "" {
+			return fmt.Errorf("empty directive name at index %d", i)
 		}
-	}
-	if before == "" {
-		directives = append(directives, name)
-	} else {
-		var found bool
-		for i, dir := range directives {
-			if dir == before {
-				directives = append(directives[:i], append([]string{name}, directives[i:]...)...)
-				found = true
-				break
-			}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("duplicate directive %q", name)
 		}
-		if !found {
-			fmt.Printf("[FATAL] %s: directive not found\n", before)
-			os.Exit(1)
-		}
+		seen[name] = struct{}{}
 	}
-	msg := fmt.Sprintf("Registered directive '%s' ", name)
-	if before == "" {
-		msg += "at end of list"
-	} else {
-		msg += fmt.Sprintf("before '%s'", before)
-	}
-	fmt.Printf("[INFO] %s\n", msg)
+	Directives = slices.Clone(directives)
+	return nil
 }

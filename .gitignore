@@ -1,7 +1,7 @@
-query.log
-Corefile
-*.swp
+# only add build artifacts concerning coredns - no editor related files
 coredns
-kubectl
-go-test-tmpfile*
-coverage.txt
+coredns.exe
+Corefile
+build/
+release/
+vendor/

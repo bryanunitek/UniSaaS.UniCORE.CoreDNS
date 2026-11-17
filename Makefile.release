@@ -1,104 +1,152 @@
 # Makefile for releasing CoreDNS
 #
-# The release binaries are built through docker run like
-# make coredns
+# The release is controlled from coremain/version.go. The version found there is
+# used to tag the git repo and to build the assets that are uploaded to GitHub.
 #
-# There advantage of the above command is that we could control reused
-# the binary generation from the default `Makefile`, instread of repeating
-# in `Makefile.release`.
+# The release should be accompanied by release notes in the notes/ subdirectory.
+# These are published on coredns.io. For example see: notes/coredns-1.5.1.md
+# Use make -f Makefile.release notes to create a skeleton notes document.
 #
-# The release is controlled from coremain/version.go. The version found
-# there is used to tag the git repo and to build the assets that are
-# uploaded to github (after some sanity checks).
+# For this to work properly you must fetch the tag of the previous release.
+# Be sure to prune the PR list a bit, not everything is worthy!
 #
-# The release should be accompanied by release notes published on
-# coredns.io. For example:
-# https://coredns.io/2016/09/18/coredns-001-release/
-# Also send an email to coredns-discuss@ to announce the new version.
+# As seen in notes/coredns-1.5.1.md we want to style the notes in the following manner:
 #
-# We use https://github.com/progrium/gh-release to automate github stuff
-# be sure to have that binary in your path.
+# * important changes at the top
+# * people who committed/review code (the latter is harder to get)
+# * Slightly abbreviated list of pull requests merged for this release.
 #
-# Get a list of authors for this release with:
+# Steps to release, first:
 #
-# git log --pretty=format:'%an' v001..master | sort -u
-# (where v001 is the previous release, obviously you'll need to adjust this)
+# 1. Up the version in coremain/version.go
+# 2. Do a make -f Makefile.doc # This has been automated in GitHub, so you can probably skip this step
+# 3. go generate
+# 4. Send PR to get this merged.
 #
-# Steps:
-# * Get an access token: https://help.github.com/articles/creating-an-access-token-for-command-line-use/
-# * export GITHUB_ACCESS_TOKEN=<token>
-# * Up the version in coremain/version.go
-# * Run: make -f Makefile.release release
-#   * will commit your change with 'Release $VERSION'
-#   * push to github
-#   * build the release and do all that fluff.
+# Then:
 #
-# Steps for docker
-# * Login into docker: docker login (should have push creds for coredns registry)
-# * Run: make -f Makefile.release docker
+# 1. Open an issue for this release
+# 2. In an issue give the command: /release master VERSION
+#    Where VERSION is the version of the release - the release script double checks this with the
+#    actual CoreDNS version in coremain/version.go
+# 3. (to test as release /release -t master VERSION can be used.
 #
-# Docker push should happen after you make the new release and uploaded it to Github.
+# See https://github.com/coredns/release for documentation README on what needs to be setup for this to be
+# automated (can still be done by hand if needed). Especially what environment variables need to be
+# set! This further depends on Caddy being setup and [dreck](https://github.com/miekg/dreck) running as a plugin in Caddy.
+#
+# To release we run, these target from the this Makefile.release ordered like:
+# * make release
+# * make github-push
+#
+# Testing this is hard-ish as you don't want to accidentally release a coredns. If not executing the github-push target
+# you should be fine.
+# Docker image creation and upload are now separate steps, because it often failed before. See the Makefile.docker for
+# details.
+
+ifeq (, $(shell which curl))
+    $(error "No curl in $$PATH, please install")
+endif
 
 NAME:=coredns
-VERSION:=$(shell grep 'coreVersion' coremain/version.go | awk '{ print $$3 }' | tr -d '"')
-ARCH:=$(shell uname -m)
+VERSION:=$(shell grep 'CoreVersion' coremain/version.go | awk '{ print $$3 }' | tr -d '"')
 GITHUB:=coredns
-DOCKER:=coredns
-DOCKER_IMAGE_NAME:=$(DOCKER)/$(NAME)
-GITCOMMIT:=$(shell git describe --dirty --always)
+LINUX_ARCH:=amd64 arm arm64 mips64le ppc64le s390x mips riscv64 loong64
+GOLANG_VERSION ?= $(shell cat .go-version)
+
+.SHELLFLAGS := -e -c
+
+export GOSUMDB = sum.golang.org
+export GOTOOLCHAIN = go$(GOLANG_VERSION)
 
 all:
-	@echo Use the 'release' target to start a release
+	@echo Use the 'release' target to build a release
 
-release: commit push build tar upload
-
-docker: docker-build docker-upload
-
-.PHONY: push
-push:
-	@echo Pushing release to master
-	git push
-
-.PHONY: commit
-commit:
-	@echo Committing
-	git commit -am"Release $(VERSION)"
+release: build tar
 
 .PHONY: build
 build:
-	@echo Building: linux  $(VERSION)
-	mkdir -p build/Linux      && $(MAKE) coredns BINARY=build/Linux/$(NAME) SYSTEM="GOOS=linux"
-	@echo Building: darwin $(VERSION)
-	mkdir -p build/Darwin     && $(MAKE) coredns BINARY=build/Darwin/$(NAME) SYSTEM="GOOS=darwin"
-	@echo Building: arm    $(VERSION)
-	mkdir -p build/Linux/Arm  && $(MAKE) coredns BINARY=build/Linux/Arm/$(NAME) SYSTEM="GOOS=linux GOARCH=arm"
+	@go version
+	@echo Cleaning old builds
+	@rm -rf build && mkdir build
+	@echo Building: darwin/amd64 - $(VERSION)
+	mkdir -p build/darwin/amd64 && $(MAKE) coredns BINARY=build/darwin/amd64/$(NAME) SYSTEM="GOOS=darwin GOARCH=amd64" CHECKS="" BUILDOPTS=""
+	@echo Building: darwin/arm64 - $(VERSION)
+	mkdir -p build/darwin/arm64 && $(MAKE) coredns BINARY=build/darwin/arm64/$(NAME) SYSTEM="GOOS=darwin GOARCH=arm64" CHECKS="" BUILDOPTS=""
+	@echo Building: windows/amd64 - $(VERSION)
+	mkdir -p build/windows/amd64 && $(MAKE) coredns BINARY=build/windows/amd64/$(NAME).exe SYSTEM="GOOS=windows GOARCH=amd64" CHECKS="" BUILDOPTS=""
+	@echo Building: linux/$(LINUX_ARCH) - $(VERSION) ;\
+	for arch in $(LINUX_ARCH); do \
+	    mkdir -p build/linux/$$arch  && $(MAKE) coredns BINARY=build/linux/$$arch/$(NAME) SYSTEM="GOOS=linux GOARCH=$$arch" CHECKS="" BUILDOPTS="" ;\
+	done
 
 .PHONY: tar
 tar:
-	rm -rf release && mkdir release
-	tar -zcf release/$(NAME)_$(VERSION)_linux_$(ARCH).tgz -C build/Linux $(NAME)
-	tar -zcf release/$(NAME)_$(VERSION)_linux_armv6l.tgz -C build/Linux/Arm $(NAME)
-	tar -zcf release/$(NAME)_$(VERSION)_darwin_$(ARCH).tgz -C build/Darwin $(NAME)
+	@echo Cleaning old releases
+	@rm -rf release && mkdir release
+	tar -zcf release/$(NAME)_$(VERSION)_darwin_amd64.tgz -C build/darwin/amd64 $(NAME)
+	tar -zcf release/$(NAME)_$(VERSION)_darwin_arm64.tgz -C build/darwin/arm64 $(NAME)
+	tar -zcf release/$(NAME)_$(VERSION)_windows_amd64.tgz -C build/windows/amd64 $(NAME).exe
+	zip -j release/$(NAME)_$(VERSION)_windows_amd64.zip build/windows/amd64/$(NAME).exe
+	for arch in $(LINUX_ARCH); do \
+	    tar -zcf release/$(NAME)_$(VERSION)_linux_$$arch.tgz -C build/linux/$$arch $(NAME) ;\
+	done
 
-.PHONY: upload
-upload:
+.PHONY: github-push
+github-push:
+ifeq ($(GITHUB_ACCESS_TOKEN),)
+	$(error "Please set the GITHUB_ACCESS_TOKEN environment variable")
+else
 	@echo Releasing: $(VERSION)
-	gh-release create $(GITHUB)/$(NAME) $(VERSION)
+	@$(eval RELEASE:=$(shell curl -s -d '{"tag_name": "v$(VERSION)", "name": "v$(VERSION)"}' -H "Authorization: token ${GITHUB_ACCESS_TOKEN}" "https://api.github.com/repos/$(GITHUB)/$(NAME)/releases" | grep -m 1 '"id"' | tr -cd '[[:digit:]]'))
+	@echo ReleaseID: $(RELEASE)
+	@( cd release; for asset in `ls -A *.tgz *.zip`; do \
+	    echo $$asset; \
+	    curl -o /dev/null -X POST \
+	      -H "Content-Type: application/octet-stream" \
+	      -H "Authorization: token ${GITHUB_ACCESS_TOKEN}" \
+	      --data-binary "@$$asset" \
+	      "https://uploads.github.com/repos/$(GITHUB)/$(NAME)/releases/$(RELEASE)/assets?name=$${asset}" ; \
+	done )
+	@( cd release; for asset in `ls -A *.tgz *.zip`; do \
+	    sha256sum $$asset > $$asset.sha256; \
+	done )
+	@( cd release; for asset in `ls -A *sha256`; do \
+	    echo $$asset; \
+	    curl -o /dev/null -X POST \
+	      -H "Content-Type: text/plain" \
+	      -H "Authorization: token ${GITHUB_ACCESS_TOKEN}" \
+	      --data-binary "@$$asset" \
+	      "https://uploads.github.com/repos/$(GITHUB)/$(NAME)/releases/$(RELEASE)/assets?name=$${asset}" ; \
+	done )
+endif
 
-.PHONY: docker-build
-docker-build:
-	$(MAKE) coredns SYSTEM="GOOS=linux"
-	docker build -t $(DOCKER_IMAGE_NAME) .
-	docker tag $(DOCKER_IMAGE_NAME):latest $(DOCKER_IMAGE_NAME):$(VERSION)
-
-.PHONY: docker-upload
-docker-upload:
-	@echo Pushing: $(VERSION)
-	docker tag $(DOCKER_IMAGE_NAME):latest $(DOCKER_IMAGE_NAME):$(VERSION)
-	docker push $(DOCKER_IMAGE_NAME):latest
-	docker push $(DOCKER_IMAGE_NAME):$(VERSION)
+.PHONY: version
+version:
+	@echo $(VERSION)
 
 .PHONY: clean
 clean:
 	rm -rf release
 	rm -rf build
+
+.PHONY: notes
+notes:
+	@$(MAKE) -s -f Makefile.release authors
+	@echo
+	@$(MAKE) -s -f Makefile.release prs
+
+.PHONY: prs
+prs:
+	@echo "## Noteworthy Changes"
+	@echo
+	@git log $$(git describe --tags --abbrev=0)..HEAD --oneline | awk ' { $$1="";print } ' | sed 's/^ //' | sed -e 's|#\([0-9]\)|https://github.com/coredns/coredns/pull/\1|' | \
+	    grep -v '^build(deps)' | \
+	    grep -v '^auto go mod tidy' | grep -v '^auto remove' | grep -v '^auto make' | sed 's/^/* /'
+
+.PHONY: authors
+authors:
+	@echo "## Brought to You By"
+	@echo
+	@git log --pretty=format:'%an' $$(git describe --tags --abbrev=0)..master | sort -u | grep -v '^coredns-auto' | grep -v '^coredns\[bot\]' | grep -v '^dependabot-preview' | \
+	    tac | cat -n | sed -e 's/^[[:space:]]\+1[[:space:]]\+\(.*\)/\1./' | sed -e 's/^[[:space:]]\+[[:digit:]]\+[[:space:]]\+\(.*\)/\1,/' | tac # comma separate, with dot at the end

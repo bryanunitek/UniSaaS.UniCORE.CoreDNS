@@ -1,32 +1,36 @@
-// +build etcd
+//go:build etcd
 
 package test
 
 import (
+	"context"
 	"encoding/json"
-	"io/ioutil"
-	"log"
 	"testing"
 	"time"
 
-	"github.com/coredns/coredns/middleware/etcd"
-	"github.com/coredns/coredns/middleware/etcd/msg"
-	"github.com/coredns/coredns/middleware/proxy"
-	"github.com/coredns/coredns/middleware/test"
-	"github.com/coredns/coredns/request"
+	"github.com/coredns/coredns/plugin/etcd"
+	"github.com/coredns/coredns/plugin/etcd/msg"
 
-	etcdc "github.com/coreos/etcd/client"
 	"github.com/miekg/dns"
-	"golang.org/x/net/context"
+	etcdcv3 "go.etcd.io/etcd/client/v3"
 )
 
-func etcdMiddleware() *etcd.Etcd {
-	etcdCfg := etcdc.Config{
+func etcdPlugin() *etcd.Etcd {
+	etcdCfg := etcdcv3.Config{
 		Endpoints: []string{"http://localhost:2379"},
 	}
-	cli, _ := etcdc.New(etcdCfg)
-	client := etcdc.NewKeysAPI(cli)
-	return &etcd.Etcd{Client: client, PathPrefix: "/skydns"}
+	cli, _ := etcdcv3.New(etcdCfg)
+	return &etcd.Etcd{Client: cli, PathPrefix: "/skydns"}
+}
+
+func etcdPluginWithCredentials(username, password string) *etcd.Etcd {
+	etcdCfg := etcdcv3.Config{
+		Endpoints: []string{"http://localhost:2379"},
+		Username:  username,
+		Password:  password,
+	}
+	cli, _ := etcdcv3.New(etcdCfg)
+	return &etcd.Etcd{Client: cli, PathPrefix: "/skydns"}
 }
 
 // This test starts two coredns servers (and needs etcd). Configure a stubzones in both (that will loop) and
@@ -37,15 +41,15 @@ func TestEtcdStubLoop(t *testing.T) {
 
 func TestEtcdStubAndProxyLookup(t *testing.T) {
 	corefile := `.:0 {
-    etcd skydns.local {
-        stubzones
-        path /skydns
-        endpoint http://localhost:2379
-        upstream 8.8.8.8:53 8.8.4.4:53
-	fallthrough
-    }
-    proxy . 8.8.8.8:53
-}`
+		etcd skydns.local {
+			stubzones
+			path /skydns
+			endpoint http://localhost:2379
+			upstream
+			fallthrough
+		}
+		forward . 8.8.8.8:53
+	}`
 
 	ex, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
@@ -53,8 +57,7 @@ func TestEtcdStubAndProxyLookup(t *testing.T) {
 	}
 	defer ex.Stop()
 
-	etc := etcdMiddleware()
-	log.SetOutput(ioutil.Discard)
+	etc := etcdPlugin()
 
 	var ctx = context.TODO()
 	for _, serv := range servicesStub { // adds example.{net,org} as stubs
@@ -62,9 +65,9 @@ func TestEtcdStubAndProxyLookup(t *testing.T) {
 		defer delete(ctx, t, etc, serv.Key)
 	}
 
-	p := proxy.NewLookup([]string{udp}) // use udp port from the server
-	state := request.Request{W: &test.ResponseWriter{}, Req: new(dns.Msg)}
-	resp, err := p.Lookup(state, "example.com.", dns.TypeA)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	resp, err := dns.Exchange(m, udp)
 	if err != nil {
 		t.Fatalf("Expected to receive reply, but didn't: %v", err)
 	}
@@ -87,18 +90,18 @@ var servicesStub = []*msg.Service{
 	{Host: "199.43.132.53", Key: "a.example.net.stub.dns.skydns.test."},
 }
 
-// Copied from middleware/etcd/setup_test.go
+// Copied from plugin/etcd/setup_test.go
 func set(ctx context.Context, t *testing.T, e *etcd.Etcd, k string, ttl time.Duration, m *msg.Service) {
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path, _ := msg.PathWithWildcard(k, e.PathPrefix)
-	e.Client.Set(ctx, path, string(b), &etcdc.SetOptions{TTL: ttl})
+	e.Client.KV.Put(ctx, path, string(b))
 }
 
-// Copied from middleware/etcd/setup_test.go
+// Copied from plugin/etcd/setup_test.go
 func delete(ctx context.Context, t *testing.T, e *etcd.Etcd, k string) {
 	path, _ := msg.PathWithWildcard(k, e.PathPrefix)
-	e.Client.Delete(ctx, path, &etcdc.DeleteOptions{Recursive: false})
+	e.Client.Delete(ctx, path)
 }

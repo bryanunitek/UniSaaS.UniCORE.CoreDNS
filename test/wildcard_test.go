@@ -1,13 +1,9 @@
 package test
 
 import (
-	"io/ioutil"
-	"log"
 	"testing"
 
-	"github.com/coredns/coredns/middleware/proxy"
-	"github.com/coredns/coredns/middleware/test"
-	"github.com/coredns/coredns/request"
+	"github.com/coredns/coredns/plugin/test"
 
 	"github.com/miekg/dns"
 )
@@ -16,14 +12,13 @@ func TestLookupWildcard(t *testing.T) {
 	t.Parallel()
 	name, rm, err := test.TempFile(".", exampleOrg)
 	if err != nil {
-		t.Fatalf("failed to create zone: %s", err)
+		t.Fatalf("Failed to create zone: %s", err)
 	}
 	defer rm()
 
 	corefile := `example.org:0 {
-       file ` + name + `
-}
-`
+		file ` + name + `
+	}`
 
 	i, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
@@ -31,13 +26,10 @@ func TestLookupWildcard(t *testing.T) {
 	}
 	defer i.Stop()
 
-	log.SetOutput(ioutil.Discard)
-
-	p := proxy.NewLookup([]string{udp})
-	state := request.Request{W: &test.ResponseWriter{}, Req: new(dns.Msg)}
-
 	for _, lookup := range []string{"a.w.example.org.", "a.a.w.example.org."} {
-		resp, err := p.Lookup(state, lookup, dns.TypeTXT)
+		m := new(dns.Msg)
+		m.SetQuestion(lookup, dns.TypeTXT)
+		resp, err := dns.Exchange(m, udp)
 		if err != nil || resp == nil {
 			t.Fatalf("Expected to receive reply, but didn't for %s", lookup)
 		}
@@ -68,7 +60,9 @@ func TestLookupWildcard(t *testing.T) {
 	}
 
 	for _, lookup := range []string{"w.example.org.", "a.w.example.org.", "a.a.w.example.org."} {
-		resp, err := p.Lookup(state, lookup, dns.TypeSRV)
+		m := new(dns.Msg)
+		m.SetQuestion(lookup, dns.TypeSRV)
+		resp, err := dns.Exchange(m, udp)
 		if err != nil || resp == nil {
 			t.Fatal("Expected to receive reply, but didn't", lookup)
 		}
@@ -92,5 +86,4 @@ func TestLookupWildcard(t *testing.T) {
 			continue
 		}
 	}
-
 }
