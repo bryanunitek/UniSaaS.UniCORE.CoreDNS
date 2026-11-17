@@ -3,11 +3,11 @@ package dnsserver
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"time"
 
 	"github.com/coredns/caddy"
+	cproxyproto "github.com/coredns/coredns/plugin/pkg/proxyproto"
 	"github.com/coredns/coredns/plugin/pkg/reuseport"
 	"github.com/coredns/coredns/plugin/pkg/transport"
 
@@ -23,18 +23,13 @@ type ServerTLS struct {
 
 // NewServerTLS returns a new CoreDNS TLS server and compiles all plugin in to it.
 func NewServerTLS(addr string, group []*Config) (*ServerTLS, error) {
-	s, err := NewServer(addr, group)
+	tlsConfig, err := sharedTLSConfig(addr, group)
 	if err != nil {
 		return nil, err
 	}
-	// The *tls* plugin must make sure that multiple conflicting
-	// TLS configuration returns an error: it can only be specified once.
-	var tlsConfig *tls.Config
-	for _, z := range s.zones {
-		for _, conf := range z {
-			// Should we error if some configs *don't* have TLS?
-			tlsConfig = conf.TLSConfig
-		}
+	s, err := NewServer(addr, group)
+	if err != nil {
+		return nil, err
 	}
 
 	return &ServerTLS{Server: s, tlsConfig: tlsConfig}, nil
@@ -54,8 +49,9 @@ func (s *ServerTLS) Serve(l net.Listener) error {
 	// Only fill out the TCP server for this one.
 	s.server[tcp] = &dns.Server{Listener: l,
 		Net:           "tcp-tls",
-		TsigSecret:    s.tsigSecret,
-		MaxTCPQueries: tlsMaxQueries,
+		TsigSecret:    s.TsigSecret,
+		MsgAcceptFunc: s.msgAcceptFunc(),
+		MaxTCPQueries: s.MaxTCPQueries,
 		ReadTimeout:   s.ReadTimeout,
 		WriteTimeout:  s.WriteTimeout,
 		IdleTimeout: func() time.Duration {
@@ -82,7 +78,11 @@ func (s *ServerTLS) Listen() (net.Listener, error) {
 		return nil, err
 	}
 	if s.connPolicy != nil {
-		l = &proxyproto.Listener{Listener: l, ConnPolicy: s.connPolicy}
+		if s.proxyProtoTLVMetadata {
+			l = cproxyproto.NewTLVListener(l, s.connPolicy)
+		} else {
+			l = &proxyproto.Listener{Listener: l, ConnPolicy: s.connPolicy}
+		}
 	}
 	return l, nil
 }
@@ -99,10 +99,6 @@ func (s *ServerTLS) OnStartupComplete() {
 
 	out := startUpZones(transport.TLS+"://", s.Addr, s.zones)
 	if out != "" {
-		fmt.Print(out)
+		printStartup(out)
 	}
 }
-
-const (
-	tlsMaxQueries = -1
-)

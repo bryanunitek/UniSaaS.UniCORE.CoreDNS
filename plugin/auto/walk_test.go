@@ -49,6 +49,36 @@ func TestWalk(t *testing.T) {
 	}
 }
 
+func TestWalkSOAOrigin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db.example.org")
+	invalid := strings.Replace(zoneContent, "@", "example.net.", 1)
+	if err := os.WriteFile(path, []byte(invalid), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := Auto{
+		loader: loader{directory: dir, re: regexp.MustCompile(`^db\.(.*)$`), template: `${1}`},
+		Zones:  &Zones{},
+	}
+	if err := a.Walk(); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Names()) != 0 {
+		t.Fatal("loaded a zone with a mismatched SOA owner")
+	}
+
+	if err := os.WriteFile(path, []byte(zoneContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Walk(); err != nil {
+		t.Fatal(err)
+	}
+	z := a.Zones.Zones("example.org.")
+	if z == nil || z.SOA == nil || z.SOA.Hdr.Name != "example.org." {
+		t.Fatal("did not load the corrected zone")
+	}
+}
+
 func TestWalkSymlinkedDirectory(t *testing.T) {
 	t.Parallel()
 	tempdir, err := createFiles(t)
@@ -141,6 +171,15 @@ func TestWalkWarnsForDuplicateOrigin(t *testing.T) {
 			t.Fatalf("Expected log to contain %q, got %q", want, got)
 		}
 	}
+	// The warning must name the kept (first, live) file in the "using" slot and
+	// the skipped backup in the "instead of" slot — not the other way around.
+	// Walk keeps example.org.zone (visited first) and skips the .bak file.
+	if !strings.Contains(got, `example.org.zone" instead of "`) {
+		t.Errorf("Warning names the wrong file as used; want the live zone in the \"using\" slot, got %q", got)
+	}
+	if strings.Contains(got, `example.org.zone.bak-20260528" instead of "`) {
+		t.Errorf("Warning claims the skipped backup is being used, got %q", got)
+	}
 
 	logBuf.Reset()
 	a.Walk()
@@ -151,6 +190,11 @@ func TestWalkWarnsForDuplicateOrigin(t *testing.T) {
 
 func TestWalkKeepsFirstMatchingFileForOrigin(t *testing.T) {
 	dir := t.TempDir()
+	// Match Walk: it stores paths after EvalSymlinks.
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	zone := filepath.Join(dir, "example.org.zone")
 	backup := filepath.Join(dir, "example.org.zone.bak-20260528")
 

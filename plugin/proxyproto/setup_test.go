@@ -1,12 +1,15 @@
 package proxyproto
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
+
+	proxyprotoLib "github.com/pires/go-proxyproto"
 )
 
 func TestSetup(t *testing.T) {
@@ -82,5 +85,68 @@ func TestSetup(t *testing.T) {
 				t.Errorf("Test %d: Expected error to contain: %v, found error: %v, input: %s", i, test.expectedErrContent, err, test.input)
 			}
 		}
+	}
+}
+
+func TestTLVMetadataFlag(t *testing.T) {
+	tests := []struct {
+		input     string
+		shouldErr bool
+		expectTLV bool
+	}{
+		{"proxyproto {\ntlv_metadata\n}", false, true},
+		{"proxyproto {\nallow 10.0.0.0/8\ntlv_metadata\n}", false, true},
+		// absent -> disabled
+		{"proxyproto {\nallow 10.0.0.0/8\n}", false, false},
+		// takes no arguments
+		{"proxyproto {\ntlv_metadata on\n}", true, false},
+	}
+	for i, test := range tests {
+		c := caddy.NewTestController("dns", test.input)
+		err := setup(c)
+		if test.shouldErr && err == nil {
+			t.Errorf("Test %d: expected error, got none for %q", i, test.input)
+			continue
+		}
+		if !test.shouldErr && err != nil {
+			t.Errorf("Test %d: unexpected error for %q: %v", i, test.input, err)
+			continue
+		}
+		if test.shouldErr {
+			continue
+		}
+		cfg := dnsserver.GetConfig(c)
+		if cfg.ProxyProtoTLVMetadata != test.expectTLV {
+			t.Errorf("Test %d: ProxyProtoTLVMetadata = %v, want %v for %q", i, cfg.ProxyProtoTLVMetadata, test.expectTLV, test.input)
+		}
+	}
+}
+
+func TestDefaultPolicyWithoutAllow(t *testing.T) {
+	c := caddy.NewTestController(
+		"dns",
+		"proxyproto {\ndefault reject\n}",
+	)
+
+	if err := setup(c); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := dnsserver.GetConfig(c)
+
+	policy, err := cfg.ProxyProtoConnPolicy(
+		proxyprotoLib.ConnPolicyOptions{
+			Upstream: &net.TCPAddr{
+				IP:   net.ParseIP("192.0.2.1"),
+				Port: 53,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if policy != proxyprotoLib.REJECT {
+		t.Fatalf("Expected REJECT, got %v", policy)
 	}
 }

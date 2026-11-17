@@ -2,6 +2,7 @@ package trace
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +39,7 @@ func traceParse(c *caddy.Controller) (*trace, error) {
 
 	cfg := dnsserver.GetConfig(c)
 	if len(cfg.ListenHosts) > 0 && cfg.ListenHosts[0] != "" {
-		tr.serviceEndpoint = cfg.ListenHosts[0] + ":" + cfg.Port
+		tr.serviceEndpoint = net.JoinHostPort(cfg.ListenHosts[0], cfg.Port)
 	}
 
 	for c.Next() { // trace
@@ -147,7 +148,8 @@ func normalizeEndpoint(epType, ep string) (string, string, error) {
 	}
 
 	if epType == "zipkin" {
-		if !strings.Contains(ep, "http") {
+		lowerEp := strings.ToLower(ep)
+		if !strings.HasPrefix(lowerEp, "http://") && !strings.HasPrefix(lowerEp, "https://") {
 			ep = "http://" + ep + "/api/v2/spans"
 		}
 	}

@@ -25,8 +25,10 @@ func setup(c *caddy.Controller) error {
 	var (
 		allowedIPNets              []*net.IPNet
 		policy                     = proxyproto.IGNORE
+		defaultSet                 bool
 		sessionTrackingTTL         time.Duration
 		sessionTrackingMaxSessions int
+		tlvMetadata                bool
 	)
 	for c.Next() {
 		args := c.RemainingArgs()
@@ -44,6 +46,7 @@ func setup(c *caddy.Controller) error {
 					allowedIPNets = append(allowedIPNets, ipnet)
 				}
 			case "default":
+				defaultSet = true
 				v := c.RemainingArgs()
 				if len(v) != 1 {
 					return plugin.Error("proxyproto", c.ArgErr())
@@ -77,6 +80,11 @@ func setup(c *caddy.Controller) error {
 					}
 					sessionTrackingMaxSessions = n
 				}
+			case "tlv_metadata":
+				if len(c.RemainingArgs()) != 0 {
+					return plugin.Error("proxyproto", c.ArgErr())
+				}
+				tlvMetadata = true
 			default:
 				return c.Errf("unknown option '%s'", c.Val())
 			}
@@ -84,6 +92,9 @@ func setup(c *caddy.Controller) error {
 	}
 	config.ProxyProtoConnPolicy = func(connPolicyOptions proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
 		if len(allowedIPNets) == 0 {
+			if defaultSet {
+				return policy, nil
+			}
 			return proxyproto.USE, nil
 		}
 		h, _, _ := net.SplitHostPort(connPolicyOptions.Upstream.String())
@@ -100,5 +111,13 @@ func setup(c *caddy.Controller) error {
 	}
 	config.ProxyProtoUDPSessionTrackingTTL = sessionTrackingTTL
 	config.ProxyProtoUDPSessionTrackingMaxSessions = sessionTrackingMaxSessions
+	config.ProxyProtoTLVMetadata = tlvMetadata
+	if tlvMetadata {
+		// Add a pass-through handler that implements metadata.Provider so the
+		// captured PPv2 TLVs are exposed as the "proxyproto/tlv" label.
+		config.AddPlugin(func(next plugin.Handler) plugin.Handler {
+			return handler{Next: next}
+		})
+	}
 	return nil
 }
